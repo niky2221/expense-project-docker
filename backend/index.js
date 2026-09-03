@@ -1,105 +1,150 @@
-const transactionService = require('./TransactionService');
 const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
-const os = require('os');
-const fetch = require('node-fetch');
-const moment = require('moment');
+const transactionService = require('./TransactionService');
 
 const app = express();
-const port = 8080;
+const PORT = process.env.APP_PORT || 8080;
 
-app.use(bodyParser.urlencoded({ extended: true }));
 app.use(bodyParser.json());
 app.use(cors());
 
-// ROUTES FOR OUR API
-// =======================================================
+// ── helpers ──────────────────────────────────────────────────────────────────
 
-//Health Checking
-app.get('/health',(req,res)=>{
-    res.json("This is the health check");
-});
+function validateTransaction(body) {
+    const errors = [];
 
-// ADD TRANSACTION
-app.post('/transaction', (req,res)=>{
-    var response = "";
-    try{
-        t=moment().unix()
-        console.log("{ \"timestamp\" : %d, \"msg\", \"Adding Expense\", \"amount\" : %d, \"Description\": \"%s\" }", t, req.body.amount, req.body.desc);
-        var success = transactionService.addTransaction(req.body.amount,req.body.desc);
-        if (success = 200) res.json({ message: 'added transaction successfully'});
-    }catch (err){
-        res.json({ message: 'something went wrong', error : err.message});
+    const amount = Number(body.amount);
+    if (!body.amount && body.amount !== 0) {
+        errors.push('amount is required');
+    } else if (!Number.isInteger(amount) || amount <= 0) {
+        errors.push('amount must be a positive integer');
+    } else if (amount > 1000000) {
+        errors.push('amount cannot exceed 1,000,000');
     }
-});
 
-// GET ALL TRANSACTIONS
-app.get('/transaction',(req,res)=>{
-    try{
-        var transactionList = [];
-       transactionService.getAllTransactions(function (results) {
-            //console.log("we are in the call back:");
-            for (const row of results) {
-                transactionList.push({ "id": row.id, "amount": row.amount, "description": row.description });
-            }
-            t=moment().unix()
-            console.log("{ \"timestamp\" : %d, \"msg\" : \"Getting All Expenses\" }", t);
-            console.log("{ \"expenses\" : %j }", transactionList);
-            res.statusCode = 200;
-            res.json({"result":transactionList});
-        });
-    }catch (err){
-        res.json({message:"could not get all transactions",error: err.message});
+    if (!body.description || String(body.description).trim() === '') {
+        errors.push('description is required');
+    } else if (String(body.description).trim().length > 255) {
+        errors.push('description cannot exceed 255 characters');
     }
-});
 
-//DELETE ALL TRANSACTIONS
-app.delete('/transaction',(req,res)=>{
-    try{
-        transactionService.deleteAllTransactions(function(result){
-            t=moment().unix()
-            console.log("{ \"timestamp\" : %d, \"msg\" : \"Deleted All Expenses\" }", t);
-            res.statusCode = 200;
-            res.json({message:"delete function execution finished."})
-        })
-    }catch (err){
-        res.json({message: "Deleting all transactions may have failed.", error:err.message});
+    if (!body.category || String(body.category).trim() === '') {
+        errors.push('category is required');
+    } else if (!transactionService.VALID_CATEGORIES.includes(body.category)) {
+        errors.push(`category must be one of: ${transactionService.VALID_CATEGORIES.join(', ')}`);
     }
+
+    return errors;
+}
+
+// ── routes ───────────────────────────────────────────────────────────────────
+
+app.get('/health', (req, res) => {
+    res.json({ status: 'ok' });
 });
 
-//DELETE ONE TRANSACTION
-app.delete('/transaction/id', (req,res)=>{
-    try{
-        //probably need to do some kind of parameter checking
-        transactionService.deleteTransactionById(req.body.id, function(result){
-            res.statusCode = 200;
-            res.json({message: `transaction with id ${req.body.id} seemingly deleted`});
-        })
-    } catch (err){
-        res.json({message:"error deleting transaction", error: err.message});
+// GET all transactions
+app.get('/transaction', (req, res) => {
+    transactionService.getAllTransactions((err, results) => {
+        if (err) {
+            console.error('GET /transaction error:', err.message);
+            return res.status(500).json({ message: 'could not retrieve transactions', error: err.message });
+        }
+        res.json({ result: results });
+    });
+});
+
+// ADD a transaction
+app.post('/transaction', (req, res) => {
+    const errors = validateTransaction(req.body);
+    if (errors.length > 0) {
+        return res.status(400).json({ message: 'validation failed', errors });
     }
+
+    const amount      = Number(req.body.amount);
+    const description = String(req.body.description).trim();
+    const category    = String(req.body.category).trim();
+
+    transactionService.addTransaction(amount, description, category, (err) => {
+        if (err) {
+            console.error('POST /transaction error:', err.message);
+            return res.status(500).json({ message: 'could not add transaction', error: err.message });
+        }
+        console.log(`Added transaction: amount=${amount} category=${category}`);
+        res.status(201).json({ message: 'transaction added successfully' });
+    });
 });
 
-//GET SINGLE TRANSACTION
-app.get('/transaction/id',(req,res)=>{
-    //also probably do some kind of parameter checking here
-    try{
-        transactionService.findTransactionById(req.body.id,function(result){
-            res.statusCode = 200;
-            var id = result[0].id;
-            var amt = result[0].amount;
-            var desc= result[0].desc;
-            res.json({"id":id,"amount":amt,"desc":desc});
-        });
+// DELETE all transactions  →  200
+app.delete('/transaction', (req, res) => {
+    transactionService.deleteAllTransactions((err) => {
+        if (err) {
+            console.error('DELETE /transaction error:', err.message);
+            return res.status(500).json({ message: 'could not delete transactions', error: err.message });
+        }
+        res.json({ message: 'all transactions deleted' });
+    });
+});
 
-    }catch(err){
-        res.json({message:"error retrieving transaction", error: err.message});
+// 405 for any other method on /transaction
+app.all('/transaction', (req, res) => {
+    res.status(405).set('Allow', 'GET, POST, DELETE').json({ message: 'method not allowed' });
+});
+
+// DELETE single transaction by id  →  204 No Content
+app.delete('/transaction/:id', (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+        return res.status(400).json({ message: 'invalid id' });
     }
+    transactionService.deleteTransactionById(id, (err) => {
+        if (err) {
+            console.error(`DELETE /transaction/${id} error:`, err.message);
+            return res.status(500).json({ message: 'could not delete transaction', error: err.message });
+        }
+        res.status(204).end();
+    });
 });
 
-  app.listen(port, () => {
-    t=moment().unix()
-    console.log("{ \"timestamp\" : %d, \"msg\" : \"App Started on Port %s\" }", t,  port)
-  })
-//
+// GET single transaction by id
+app.get('/transaction/:id', (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+        return res.status(400).json({ message: 'invalid id' });
+    }
+    transactionService.findTransactionById(id, (err, results) => {
+        if (err) {
+            console.error(`GET /transaction/${id} error:`, err.message);
+            return res.status(500).json({ message: 'could not retrieve transaction', error: err.message });
+        }
+        if (!results || results.length === 0) {
+            return res.status(404).json({ message: `transaction ${id} not found` });
+        }
+        res.json(results[0]);
+    });
+});
+
+// 405 for any other method on /transaction/:id
+app.all('/transaction/:id', (req, res) => {
+    res.status(405).set('Allow', 'GET, DELETE').json({ message: 'method not allowed' });
+});
+
+// ── demo endpoints for gateway error codes ────────────────────────────────────
+
+// 503 — uncomment the return line in nginx-lb.conf instead for a real infra demo,
+//        but this endpoint lets you trigger it from the app layer too
+app.get('/maintenance', (req, res) => {
+    res.status(503).set('Retry-After', '60').json({ message: 'service temporarily unavailable' });
+});
+
+// 504 — responds after 40 s; nginx lb has proxy_read_timeout 10s → gateway times out first
+app.get('/slow', (req, res) => {
+    setTimeout(() => res.json({ message: 'finally responded after 40 s' }), 40000);
+});
+
+// ── start ─────────────────────────────────────────────────────────────────────
+
+app.listen(PORT, () => {
+    console.log(`Expense backend v3 listening on port ${PORT}`);
+});
