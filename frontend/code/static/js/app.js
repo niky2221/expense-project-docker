@@ -136,7 +136,7 @@ resetBtn.addEventListener('click', function() {
 });
 
 // ── Fetch & render ────────────────────────────────────────────────────────────
-function fetchTransactions() {
+function fetch Transactions() {
   loadingEl.style.display = 'block';
   tableWrap.style.display = 'none';
   emptyState.style.display = 'none';
